@@ -719,9 +719,6 @@ export default function VaultRunGame({ address, provider }) {
                 </div>
               ) : null}
 
-              <div className="vr-hint">
-                Provider note: if you do not pass a provider prop, set <span className="vr-mono">VITE_RPC_URL</span> for the chain where those contracts are deployed.
-              </div>
             </div>
           </div>
 
