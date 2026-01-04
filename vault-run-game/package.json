@@ -13,11 +13,13 @@
     "@reown/appkit": "^1.8.15",
     "@reown/appkit-adapter-wagmi": "^1.8.15",
     "@tailwindcss/vite": "^4.1.13",
+    "ethers": "^6.16.0",
     "framer-motion": "^12.23.12",
     "init": "^0.1.2",
     "lucide-react": "^0.543.0",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3"
+    "react-dom": "^19.2.3",
+    "v6": "^0.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",

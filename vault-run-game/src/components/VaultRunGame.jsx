@@ -6,7 +6,7 @@ import {
   DUSTCLAIMV3_ADDRESS,
   verifyDustClaimTx,
   verifySweepTx
-} from "../utils/txRedeem";
+} from "../utils/txReedem";
 
 /**
  * VaultRunGame.jsx (TxHash Redeem edition)
