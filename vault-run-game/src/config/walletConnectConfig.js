@@ -101,12 +101,14 @@ export const SUPPORTED_CHAINS = {
     logo: '/logo/fantom.png'
   },
   59144: {
-    name: 'Linea',
-    symbol: 'ETH',
-    rpcUrl: `https://linea-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
-    explorer: 'https://lineascan.build',
-    logo: '/logo/linea.png'
-  },
+  name: 'Linea',
+  symbol: 'ETH',
+  rpcUrl: ALCHEMY_API_KEY
+    ? `https://linea-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`
+    : "https://rpc.linea.build",
+  explorer: 'https://lineascan.build',
+  logo: '/logo/linea.png'
+},
 
   // Emerging and Specialized Chains
   7777777: {
