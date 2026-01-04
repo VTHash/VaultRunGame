@@ -1,0 +1,10 @@
+[build]
+base    = "hfv-app"
+  command = "npm ci && npm run build"
+    publish = "hfv-app/dist"
+      functions = "hfv-app/netlify/functions"
+
+          [[redirects]]
+            from = "/*"
+              to = "/index.html"
+                status = 200
