@@ -1,0 +1,8 @@
+{
+  "name": "GoldenDust Relic",
+  "description": "Vault Run Relic (Rare). Minted after verified txHash proof.",
+  "image": "ipfs://<IMAGES_CID>/gold.png",
+  "attributes": [
+    { "trait_type": "Rarity", "value": "Rare" }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "SilverDust Relic",
+  "description": "Vault Run Relic (Common). Minted after verified txHash proof.",
+  "image": "ipfs://<IMAGES_CID>/silver.png",
+  "attributes": [
+    { "trait_type": "Rarity", "value": "Common" }
+  ]
+}
