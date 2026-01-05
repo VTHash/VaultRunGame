@@ -1,6 +1,6 @@
 [build]
 base    = "vault-run-game"
-  command = "npm ci && npm run build"
+  command = "npm run build"
     publish = "dist"
       functions = "netlify/functions"
 
