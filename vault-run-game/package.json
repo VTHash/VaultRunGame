@@ -11,7 +11,10 @@
   },
   "dependencies": {
     "@reown/appkit": "^1.8.15",
+    "@reown/appkit-adapter-ethers": "^1.8.15",
     "@reown/appkit-adapter-wagmi": "^1.8.15",
+    "@safe-global/safe-apps-provider": "^0.18.6",
+    "@safe-global/safe-apps-sdk": "^9.1.0",
     "@tailwindcss/vite": "^4.1.13",
     "ethers": "^6.16.0",
     "framer-motion": "^12.23.12",
