@@ -708,7 +708,7 @@ export default function VaultRunGame({ address, provider }) {
               <span className="vr-mono">
                 {RELICS_CONTRACT && ethers.isAddress(RELICS_CONTRACT)
                   ? RELICS_CONTRACT
-                  : "Set VITE_DUST_RELICS_ADDRESS"}
+                  : "0x41Dc03adb5E1ee0915BA00617c4516D1293deC6c"}
               </span>
             </div>
           </div>
