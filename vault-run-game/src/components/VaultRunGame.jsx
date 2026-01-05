@@ -176,7 +176,7 @@ function saveState(state) {
 
 function pickProvider(passedProvider) {
   if (passedProvider) return passedProvider;
-  const rpc = import.meta.env.VITE_RPC_URL;
+  const rpc = import.meta.env.VITE_LINEA_RPC;
   if (!rpc) return null;
   return new ethers.JsonRpcProvider(rpc);
 }
@@ -261,7 +261,6 @@ export default function VaultRunGame({ address, provider }) {
 
   // ENV: keep your existing name, add a fallback
   const RELICS_CONTRACT =
-    import.meta.env.VITE_DUST_RELICS_ADDRESS ||
     import.meta.env.VITE_DUSTRELICS1155_ADDRESS ||
     "";
 
