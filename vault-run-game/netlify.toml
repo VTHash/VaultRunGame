@@ -1,8 +1,8 @@
 [build]
-base    = "hfv-app"
+base    = "vault-run-game"
   command = "npm ci && npm run build"
-    publish = "hfv-app/dist"
-      functions = "hfv-app/netlify/functions"
+    publish = "dist"
+      functions = "netlify/functions"
 
           [[redirects]]
             from = "/*"
