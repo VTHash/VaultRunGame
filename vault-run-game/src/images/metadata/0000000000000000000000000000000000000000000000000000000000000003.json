@@ -1,7 +1,8 @@
+
 {
   "name": "DiamondDust Relic",
   "description": "Vault Run Relic (Epic). Minted after verified txHash proof.",
-  "image": "ipfs://<IMAGES_CID>/diamond.png",
+  "image": "ipfs://QmRyvZwGuCtzLc6eh3YnX3EoVzdTx5w6kCFMLWTqu1D447",
   "attributes": [
     { "trait_type": "Rarity", "value": "Epic" }
   ]
