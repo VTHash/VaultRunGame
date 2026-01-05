@@ -9,25 +9,18 @@ export const DUSTCLAIMV3_ADDRESS = "0xBB45cc85B5e6505Ad1C8403227Da68ba0F13357B";
 
 // -----------------------------
 // DustRelics1155 (ERC1155) config
-// IMPORTANT: set this in .env to avoid hardcoding:
-// VITE_DUSTRELICS1155_ADDRESS="0x..."
 // -----------------------------
-export const DUSTRELICS1155_ADDRESS = import.meta.env.VITE_DUSTRELICS1155_ADDRESS || "";
+export const DUSTRELICS1155_ADDRESS =
+  import.meta.env.VITE_DUSTRELICS1155_ADDRESS ||
+  import.meta.env.VITE_DUST_RELICS_ADDRESS || // fallback if you used older key
+  "";
 
 // Rarity IDs (MUST match the contract)
 export const RELIC_ID = {
-  SILVER: 1, // Common
-  GOLD: 2, // Rare
-  DIAMOND: 3, // Epic
-  EMERALD: 4, // Legendary
-};
-
-// Chest roll mapping (MUST match VaultRunGame.jsx text)
-export const CHEST_RARITY_TO_ID = {
-  "Common Relic": RELIC_ID.SILVER,
-  "Rare Relic": RELIC_ID.GOLD,
-  "Epic Relic": RELIC_ID.DIAMOND,
-  "Legendary Relic": RELIC_ID.EMERALD,
+  SILVER: 1,
+  GOLD: 2,
+  DIAMOND: 3,
+  EMERALD: 4,
 };
 
 // -----------------------------
@@ -39,17 +32,6 @@ const DUST_ABI_EVENTS = [
 
 const DUSTCLAIM_ABI_EVENTS = [
   "event DustClaimed(address indexed user, address indexed token, uint256 amountIn, uint256 ethOut)",
-];
-
-// ERC1155 Relics: helpful for on-chain verification / UX
-const RELICS1155_ABI_READ = [
-  "function minted(uint256 id) view returns (uint256)",
-  "function usedTxHash(bytes32 txHash) view returns (bool)",
-  "function nonces(address user) view returns (uint256)",
-  "function MAX_SUPPLY_PER_ID() view returns (uint256)",
-  "function signer() view returns (address)",
-  "function mintingEnabled() view returns (bool)",
-  "event RelicMinted(address indexed to, uint256 indexed id, uint256 amount, bytes32 indexed txHash)",
 ];
 
 const dustIface = new ethers.Interface(DUST_ABI_EVENTS);
@@ -65,18 +47,7 @@ export function isLikelyTxHash(s) {
 export function toBytes32TxHash(txHash) {
   const h = (txHash || "").trim();
   if (!isLikelyTxHash(h)) throw new Error("Invalid tx hash");
-  // tx hash is already 32 bytes hex string
-  return h;
-}
-
-export function getExplorerTxUrl(chainMetaOrUrl, txHash) {
-  if (!txHash) return "";
-  const base =
-    typeof chainMetaOrUrl === "string"
-      ? chainMetaOrUrl
-      : chainMetaOrUrl?.explorer || "";
-  if (!base) return "";
-  return `${base.replace(/\/$/, "")}/tx/${txHash}`;
+  return h.toLowerCase();
 }
 
 function normAddr(a) {
@@ -86,8 +57,7 @@ function normAddr(a) {
 async function safeGetReceipt(provider, txHash) {
   try {
     return await provider.getTransactionReceipt(txHash);
-  } catch (e) {
-    // Provider can throw on malformed hashes / rate limits
+  } catch {
     return null;
   }
 }
@@ -103,7 +73,7 @@ export async function verifyDustClaimTx({ provider, txHash, expectedUser }) {
 
   const receipt = await safeGetReceipt(provider, hash);
   if (!receipt) {
-    return { ok: false, reason: "Transaction not found yet (still pending or wrong hash)." };
+    return { ok: false, reason: "Transaction not found yet (pending / wrong hash / wrong network)." };
   }
   if (receipt.status !== 1) return { ok: false, reason: "Transaction failed." };
 
@@ -125,17 +95,18 @@ export async function verifyDustClaimTx({ provider, txHash, expectedUser }) {
         ok: true,
         kind: "DUST_DAILY",
         user,
-        amount: parsed.args.amount, // BigInt
+        amount: parsed.args.amount,
         timestamp: Number(parsed.args.timestamp),
         txHash: receipt.hash,
         blockNumber: receipt.blockNumber,
       };
     } catch {
-      // ignore non-matching logs
+      // ignore
     }
   }
 
-  return { ok: false, reason: "No Dust Claimed event found in this transaction." };
+  // FIX: message previously said "Dust Claimed event" (wrong wording)
+  return { ok: false, reason: "No Claimed event found in this transaction." };
 }
 
 // -----------------------------
@@ -149,7 +120,7 @@ export async function verifySweepTx({ provider, txHash, expectedUser }) {
 
   const receipt = await safeGetReceipt(provider, hash);
   if (!receipt) {
-    return { ok: false, reason: "Transaction not found yet (still pending or wrong hash)." };
+    return { ok: false, reason: "Transaction not found yet (pending / wrong hash / wrong network)." };
   }
   if (receipt.status !== 1) return { ok: false, reason: "Transaction failed." };
 
@@ -172,95 +143,15 @@ export async function verifySweepTx({ provider, txHash, expectedUser }) {
         kind: "SWEEP",
         user,
         token: parsed.args.token,
-        amountIn: parsed.args.amountIn, // BigInt
-        ethOut: parsed.args.ethOut, // BigInt
+        amountIn: parsed.args.amountIn,
+        ethOut: parsed.args.ethOut,
         txHash: receipt.hash,
         blockNumber: receipt.blockNumber,
-      };
-    } catch {
-      // ignore non-matching logs
-    }
-  }
-
-  return { ok: false, reason: "No DustClaimed event found in this transaction." };
-}
-
-// -----------------------------
-// Relics (ERC1155) helpers for the UI/backend flow
-// NOTE: the actual mint requires a SERVER signature, so this file focuses on:
-// - checking whether a txHash is already used on-chain
-// - reading the user nonce for signing
-// - reading minted supply / caps for displaying "sold out"
-// -----------------------------
-export function getRelicsContract(providerOrSigner) {
-  if (!DUSTRELICS1155_ADDRESS) return null;
-  if (!providerOrSigner) return null;
-  return new ethers.Contract(DUSTRELICS1155_ADDRESS, RELICS1155_ABI_READ, providerOrSigner);
-}
-
-export async function getRelicsMintStatus({ provider, txHash, user, id }) {
-  const c = getRelicsContract(provider);
-  if (!c) {
-    return {
-      ok: false,
-      reason: "Relics contract not configured. Set VITE_DUSTRELICS1155_ADDRESS.",
-    };
-  }
-
-  const out = {
-    ok: true,
-    mintingEnabled: null,
-    signer: null,
-    maxSupplyPerId: null,
-    minted: null,
-    usedTxHash: null,
-    nonce: null,
-  };
-
-  try {
-    const bytes32Hash = toBytes32TxHash(txHash);
-    const [enabled, signerAddr, maxSupply, mintedCount, used, nonce] = await Promise.all([
-      c.mintingEnabled(),
-      c.signer(),
-      c.MAX_SUPPLY_PER_ID(),
-      typeof id === "number" ? c.minted(id) : Promise.resolve(null),
-      c.usedTxHash(bytes32Hash),
-      user ? c.nonces(user) : Promise.resolve(null),
-    ]);
-
-    out.mintingEnabled = Boolean(enabled);
-    out.signer = signerAddr;
-    out.maxSupplyPerId = maxSupply; // BigInt
-    out.minted = mintedCount; // BigInt | null
-    out.usedTxHash = Boolean(used);
-    out.nonce = nonce; // BigInt | null
-
-    return out;
-  } catch (e) {
-    return { ok: false, reason: e?.message || "Failed to read Relics contract." };
-  }
-}
-
-// Parse RelicMinted event from a receipt (optional UX)
-export function parseRelicMintedFromReceipt(receipt) {
-  if (!receipt || !receipt.logs) return null;
-  const iface = new ethers.Interface([
-    "event RelicMinted(address indexed to, uint256 indexed id, uint256 amount, bytes32 indexed txHash)",
-  ]);
-
-  for (const log of receipt.logs) {
-    try {
-      const p = iface.parseLog(log);
-      if (p?.name !== "RelicMinted") continue;
-      return {
-        to: p.args.to,
-        id: Number(p.args.id),
-        amount: p.args.amount, // BigInt
-        txHash: p.args.txHash, // bytes32
       };
     } catch {
       // ignore
     }
   }
-  return null;
+
+  return { ok: false, reason: "No DustClaimed event found in this transaction." };
 }

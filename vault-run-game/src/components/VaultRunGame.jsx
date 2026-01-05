@@ -1,10 +1,15 @@
-// VaultRunGame.jsx
-// TxHash Redeem + deterministic rarity + Linea ERC1155 mintWithSig
+// src/components/VaultRunGame.jsx
+// PERFECT ALIGNMENT with:
+// - DustRelics1155.sol (mintWithSig + nonce-based EIP712)
+// - mintAuth.js (Netlify) returning: { ok, rarityId, amount, txHash32, nonce, deadline, signature }
+// - txReedem.js verifyDustClaimTx / verifySweepTx
 //
-// Key points:
-// - Rarity is derived deterministically from the proof txHash (prevents reroll abuse).
-// - That rarityId is sent to your backend mintAuth so the signature matches the contract call.
-// - Uses env var VITE_DUST_RELICS_ADDRESS (and fallback VITE_DUSTRELICS1155_ADDRESS).
+// Key behavior:
+// 1) User redeems a proof txHash => Keys + XP are granted locally (persisted).
+// 2) Mint consumes 1 Key ONLY after on-chain mint success.
+// 3) Rarity is deterministic from proof txHash (prevents reroll abuse).
+// 4) Frontend sends rarityId + amount to mintAuth, and enforces server matches them.
+// 5) Every button uses type="button" to prevent form-submit issues.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ethers } from "ethers";
@@ -21,10 +26,8 @@ const START_ENERGY = 5;
 const VAULT_COUNT = 12;
 const COMBO_WINDOW_MS = 8000;
 
-// Storage
-const LS_KEY = "dustclaim_vault_run_state_v1";
+const LS_KEY = "dustclaim_vault_run_state_v2"; // bump version to avoid old/broken state
 
-// Rewards
 const REWARD = {
   daily: { keys: 1, xp: 250 },
   sweep: { maxKeys: 10, minKeys: 1, xpBase: 250 }
@@ -53,11 +56,9 @@ const RELIC = {
   4: "EmeraldDust" // Legendary
 };
 
-// Contract ABI
+// Contract ABI MUST match DustRelics1155.sol
 const RELICS_ABI = [
-  "function mintWithSig(uint256 id,uint256 amount,bytes32 txHash,uint256 deadline,bytes sig) external",
-  "function usedTxHash(bytes32) view returns (bool)",
-  "function minted(uint256) view returns (uint256)"
+  "function mintWithSig(uint256 id,uint256 amount,bytes32 txHash,uint256 deadline,bytes sig) external"
 ];
 
 function clamp(n, a, b) {
@@ -150,33 +151,41 @@ function loadState() {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
+    const p = JSON.parse(raw);
     return {
-      ...parsed,
-      redeemedTxs: new Set(parsed.redeemedTxs || []),
-      mintedProofs: new Set(parsed.mintedProofs || [])
+      xp: Number(p.xp || 0),
+      keys: Number(p.keys || 0),
+      redeemedTxs: new Set(p.redeemedTxs || []),
+      mintedProofs: new Set(p.mintedProofs || [])
     };
   } catch {
     return null;
   }
 }
 
-function saveState(state) {
+function saveState({ xp, keys, redeemedTxs, mintedProofs }) {
   try {
-    const out = {
-      ...state,
-      redeemedTxs: Array.from(state.redeemedTxs || []),
-      mintedProofs: Array.from(state.mintedProofs || [])
-    };
-    localStorage.setItem(LS_KEY, JSON.stringify(out));
-  } catch {
-    // ignore
-  }
+    localStorage.setItem(
+      LS_KEY,
+      JSON.stringify({
+        xp: Number(xp || 0),
+        keys: Number(keys || 0),
+        redeemedTxs: Array.from(redeemedTxs || []),
+        mintedProofs: Array.from(mintedProofs || [])
+      })
+    );
+  } catch {}
+}
+
+function clearState() {
+  try {
+    localStorage.removeItem(LS_KEY);
+  } catch {}
 }
 
 function pickProvider(passedProvider) {
   if (passedProvider) return passedProvider;
-  const rpc = import.meta.env.VITE_LINEA_RPC;
+  const rpc = import.meta.env.VITE_LINEA_RPC || import.meta.env.VITE_RPC_URL || "";
   if (!rpc) return null;
   return new ethers.JsonRpcProvider(rpc);
 }
@@ -197,19 +206,13 @@ function likelyLineaNetwork(chainId) {
   return Number(chainId) === LINEA_CHAIN_ID;
 }
 
-// Deterministic rarity from txHash (prevents reroll abuse)
-// Matches your chest thresholds:
-// - Legendary > 0.92 (8%)
-// - Epic > 0.75 (17%)
-// - Rare > 0.45 (30%)
-// - Common otherwise (45%)
+// Deterministic rarity from txHash (prevents reroll abuse).
+// Matches your old chest thresholds: 45% common, 30% rare, 17% epic, 8% legendary.
 function rarityFromTxHash(txHash) {
-  // Convert to bytes and hash again for uniformity
   const h = ethers.keccak256(ethers.getBytes(txHash));
-  // Take first 4 bytes => 0..2^32-1
+  // first 4 bytes -> uint32
   const n = Number(BigInt(h.slice(0, 10)));
-  const pct = n / 0xffffffff; // 0..1
-
+  const pct = n / 0xffffffff;
   if (pct > 0.92) return 4; // EmeraldDust
   if (pct > 0.75) return 3; // DiamondDust
   if (pct > 0.45) return 2; // GoldenDust
@@ -217,7 +220,7 @@ function rarityFromTxHash(txHash) {
 }
 
 export default function VaultRunGame({ address, provider }) {
-  const [mode] = useState("PRACTICE");
+  const [mode] = useState("PRACTICE"); // gameplay is local
   const [state, setState] = useState("IDLE"); // IDLE | RUNNING | FINISHED
   const [secondsLeft, setSecondsLeft] = useState(RUN_SECONDS);
   const [energy, setEnergy] = useState(START_ENERGY);
@@ -228,22 +231,21 @@ export default function VaultRunGame({ address, provider }) {
   const [comboEndsAt, setComboEndsAt] = useState(0);
 
   const [uniqueCleared, setUniqueCleared] = useState(() => new Set());
-  const [toast, setToast] = useState("Play a fast run, then redeem a txHash for Keys.");
+  const [toast, setToast] = useState("Redeem a txHash to receive Keys, then mint your Relic on Linea.");
 
-  // Progression (persisted)
+  // progression
   const [xp, setXp] = useState(0);
   const [keys, setKeys] = useState(0);
   const [redeemedTxs, setRedeemedTxs] = useState(() => new Set());
   const [mintedProofs, setMintedProofs] = useState(() => new Set());
   const [chestMsg, setChestMsg] = useState("");
 
-  // Redeem
+  // redeem/mint UI
   const [redeemType, setRedeemType] = useState("DAILY"); // DAILY | SWEEP
   const [txHash, setTxHash] = useState("");
   const [redeemBusy, setRedeemBusy] = useState(false);
   const [redeemResult, setRedeemResult] = useState(null);
 
-  // Mint
   const [mintBusy, setMintBusy] = useState(false);
   const [mintMsg, setMintMsg] = useState("");
   const [mintResult, setMintResult] = useState(null);
@@ -252,34 +254,31 @@ export default function VaultRunGame({ address, provider }) {
   const isRunning = state === "RUNNING";
 
   const grade = useMemo(() => gradeFromScore(score), [score]);
-  const clearedCount = useMemo(
-    () => vaults.filter(v => v.status === "CLEARED").length,
-    [vaults]
-  );
-
+  const clearedCount = useMemo(() => vaults.filter(v => v.status === "CLEARED").length, [vaults]);
   const activeProvider = useMemo(() => pickProvider(provider), [provider]);
 
-  // ENV: keep your existing name, add a fallback
+  // env: accept both names, prefer VITE_DUSTRELICS1155_ADDRESS
   const RELICS_CONTRACT =
     import.meta.env.VITE_DUSTRELICS1155_ADDRESS ||
+    import.meta.env.VITE_DUST_RELICS_ADDRESS ||
     "";
 
-  // Load persisted
+  // load persisted
   useEffect(() => {
     const st = loadState();
     if (!st) return;
-    setXp(Number(st.xp || 0));
-    setKeys(Number(st.keys || 0));
-    setRedeemedTxs(st.redeemedTxs || new Set());
-    setMintedProofs(st.mintedProofs || new Set());
+    setXp(st.xp);
+    setKeys(st.keys);
+    setRedeemedTxs(st.redeemedTxs);
+    setMintedProofs(st.mintedProofs);
   }, []);
 
-  // Persist
+  // persist
   useEffect(() => {
     saveState({ xp, keys, redeemedTxs, mintedProofs });
   }, [xp, keys, redeemedTxs, mintedProofs]);
 
-  // Combo expiry
+  // combo expiry
   useEffect(() => {
     if (!isRunning) return;
     const id = setInterval(() => {
@@ -292,7 +291,7 @@ export default function VaultRunGame({ address, provider }) {
     return () => clearInterval(id);
   }, [isRunning, comboCount, comboEndsAt]);
 
-  // Main timer
+  // main timer
   useEffect(() => {
     if (!isRunning) return;
 
@@ -330,7 +329,7 @@ export default function VaultRunGame({ address, provider }) {
     setComboCount(0);
     setComboEndsAt(0);
     setUniqueCleared(new Set());
-    setToast("Play a fast run, then redeem a txHash for Keys.");
+    setToast("Run again, then redeem a txHash to receive Keys.");
     setChestMsg("");
 
     setRedeemResult(null);
@@ -352,44 +351,17 @@ export default function VaultRunGame({ address, provider }) {
     timerRef.current = null;
   }
 
-  function addScoreForClear(vault) {
-    const base = 100;
-    const vBonus = valueBonus(vault.estUsd);
-    const isNewToken = !uniqueCleared.has(vault.symbol);
-    const diversity = isNewToken ? 40 : 0;
-
-    const now = Date.now();
-    let nextCombo = comboCount;
-
-    if (comboCount > 0 && comboEndsAt && now <= comboEndsAt) nextCombo = comboCount + 1;
-    else nextCombo = 1;
-
-    const mult = comboMultiplier(nextCombo);
-    const speed = Math.floor(mult * 25);
-
-    const add = Math.floor((base + vBonus + diversity + speed) * mult);
-
-    setScore(s => s + add);
-    setComboCount(nextCombo);
-    setComboEndsAt(now + COMBO_WINDOW_MS);
-
-    if (isNewToken) {
-      setUniqueCleared(prev => {
-        const n = new Set(prev);
-        n.add(vault.symbol);
-        return n;
-      });
-    }
-
-    setToast(`${vault.symbol} cleared: +${add} (combo x${mult.toFixed(2)})`);
-  }
-
-  function addPenalty(reason) {
-    setScore(s => Math.max(0, s - 75));
-    setComboCount(0);
-    setComboEndsAt(0);
-    setEnergy(e => Math.max(0, e - 1));
-    setToast(`${reason}: -75, -1 energy (combo reset)`);
+  function resetInventory() {
+    clearState();
+    setXp(0);
+    setKeys(0);
+    setRedeemedTxs(new Set());
+    setMintedProofs(new Set());
+    setRedeemResult(null);
+    setMintMsg("");
+    setMintResult(null);
+    setChestMsg("");
+    setToast("Inventory reset on this device. Redeem your txHash again.");
   }
 
   async function clearVaultPractice(vaultId) {
@@ -406,144 +378,57 @@ export default function VaultRunGame({ address, provider }) {
     const ok = Math.random() < risk.success;
     if (!ok) {
       setVaults(prev => prev.map(x => x.id === vaultId ? { ...x, status: "FAILED" } : x));
-      addPenalty(`${v.symbol} vault resisted`);
+      setScore(s => Math.max(0, s - 75));
+      setComboCount(0);
+      setComboEndsAt(0);
+      setEnergy(e => Math.max(0, e - 1));
+      setToast(`${v.symbol} vault resisted: -75 score, -1 energy`);
       return;
     }
 
+    const base = 100;
+    const vBonus = valueBonus(v.estUsd);
+    const isNewToken = !uniqueCleared.has(v.symbol);
+    const diversity = isNewToken ? 40 : 0;
+
+    const now = Date.now();
+    const nextCombo = (comboCount > 0 && comboEndsAt && now <= comboEndsAt) ? comboCount + 1 : 1;
+    const mult = comboMultiplier(nextCombo);
+    const speed = Math.floor(mult * 25);
+    const add = Math.floor((base + vBonus + diversity + speed) * mult);
+
     setVaults(prev => prev.map(x => x.id === vaultId ? { ...x, status: "CLEARED" } : x));
-    addScoreForClear(v);
+    setScore(s => s + add);
+    setComboCount(nextCombo);
+    setComboEndsAt(now + COMBO_WINDOW_MS);
+
+    if (isNewToken) {
+      setUniqueCleared(prev => {
+        const n = new Set(prev);
+        n.add(v.symbol);
+        return n;
+      });
+    }
+
+    setToast(`${v.symbol} cleared: +${add} score (combo x${mult.toFixed(2)})`);
   }
 
   function openChest() {
+    // This is cosmetic only. Keys are primarily for minting.
+    setChestMsg("");
     if (keys <= 0) {
-      setChestMsg("You need a Key. Redeem a txHash to get Keys.");
+      setChestMsg("You need a Key. Redeem a txHash first.");
       return;
     }
-    setKeys(k => k - 1);
+    setKeys(k => Math.max(0, Number(k) - 1));
 
-    // Cosmetic only (keep as you had)
+    // Cosmetic roll (does not affect mint rarity; mint rarity is deterministic from txHash)
     const r = Math.random();
     let drop = "Common Relic";
     if (r > 0.92) drop = "Legendary Relic";
     else if (r > 0.75) drop = "Epic Relic";
     else if (r > 0.45) drop = "Rare Relic";
-    setChestMsg(`Chest opened: ${drop}`);
-  }
-
-  async function mintRelicFromProof() {
-    try {
-      setMintMsg("");
-      setMintResult(null);
-
-      if (!redeemResult?.ok || !redeemResult?.proofTxHash) {
-        setMintMsg("Redeem a txHash first.");
-        return;
-      }
-      if (!address) {
-        setMintMsg("Connect wallet first.");
-        return;
-      }
-      if (!hasInjectedWallet()) {
-        setMintMsg("No wallet detected (MetaMask / injected).");
-        return;
-      }
-      if (!RELICS_CONTRACT || !ethers.isAddress(RELICS_CONTRACT)) {
-        setMintMsg("Missing or invalid VITE_DUST_RELICS_ADDRESS.");
-        return;
-      }
-
-      const proofKey = makeProofKey(redeemResult.proofTxHash, redeemResult.kind);
-      if (mintedProofs.has(proofKey)) {
-        setMintMsg("This proof has already been minted in this browser.");
-        return;
-      }
-
-      // Deterministic rarity based on proofTxHash
-      const rarityId = rarityFromTxHash(redeemResult.proofTxHash);
-      const rarityName = RELIC[rarityId] || `Relic #${rarityId}`;
-
-      setMintBusy(true);
-
-      // Ask backend for signature (must sign the SAME rarityId)
-      // Expected backend response: { ok, rarityId, amount, txHash32, deadline, signature }
-      const res = await fetch("/.netlify/functions/mintAuth", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          txHash: redeemResult.proofTxHash,
-          expectedUser: address,
-          rarityId,
-          amount: 1,
-          nftContract: RELICS_CONTRACT
-        })
-      });
-
-      const data = await res.json();
-      if (!data?.ok) {
-        setMintResult({ ok: false, reason: data?.reason || "Mint auth failed." });
-        setMintMsg(data?.reason || "Mint auth failed.");
-        return;
-      }
-
-      // Enforce signature uses the same rarityId we derived
-      if (Number(data.rarityId) !== Number(rarityId)) {
-        setMintResult({ ok: false, reason: "Server returned mismatched rarityId." });
-        setMintMsg("Server returned mismatched rarityId.");
-        return;
-      }
-
-      // Switch/check Linea
-      const browserProvider = new ethers.BrowserProvider(window.ethereum);
-      const net = await browserProvider.getNetwork();
-      if (!likelyLineaNetwork(net.chainId)) {
-        setMintResult({ ok: false, reason: "Wrong network. Switch to Linea Mainnet." });
-        setMintMsg("Wrong network. Switch to Linea Mainnet.");
-        return;
-      }
-
-      const signer = await browserProvider.getSigner();
-      const relics = new ethers.Contract(RELICS_CONTRACT, RELICS_ABI, signer);
-
-      setMintMsg(`Minting ${rarityName}…`);
-
-      // data.txHash32 must be bytes32 (0x + 64 hex chars)
-      const tx = await relics.mintWithSig(
-        data.rarityId,
-        data.amount,
-        data.txHash32,
-        data.deadline,
-        data.signature
-      );
-
-      setMintMsg("Mint submitted…");
-      const receipt = await tx.wait();
-
-      setMintedProofs(prev => {
-        const n = new Set(prev);
-        n.add(proofKey);
-        return n;
-      });
-
-      setMintResult({
-        ok: true,
-        msg: `Minted ${rarityName}`,
-        details: {
-          rarityId: Number(data.rarityId),
-          rarity: rarityName,
-          mintTxHash: receipt?.hash || tx.hash,
-          proofTxHash: redeemResult.proofTxHash,
-          contract: RELICS_CONTRACT
-        }
-      });
-
-      setMintMsg(`Relic minted: ${rarityName}`);
-    } catch (e) {
-      const reason = e?.shortMessage || e?.message || "Mint failed.";
-      setMintResult({ ok: false, reason });
-      setMintMsg(reason);
-    } finally {
-      setMintBusy(false);
-    }
+    setChestMsg(`Chest opened: ${drop} (cosmetic)`);
   }
 
   async function redeem() {
@@ -552,44 +437,43 @@ export default function VaultRunGame({ address, provider }) {
       setRedeemResult({ ok: false, reason: "Invalid tx hash format." });
       return;
     }
-
-    const lower = hash.toLowerCase();
-    if (redeemedTxs.has(lower)) {
-      setRedeemResult({ ok: false, reason: "This txHash has already been redeemed in this browser." });
+    if (!activeProvider) {
+      setRedeemResult({ ok: false, reason: "Missing provider. Set VITE_LINEA_RPC (or VITE_RPC_URL) or pass provider prop." });
+      return;
+    }
+    if (!address || !ethers.isAddress(address)) {
+      setRedeemResult({ ok: false, reason: "Connect wallet first (needed to enforce tx belongs to you)." });
       return;
     }
 
-    if (!activeProvider) {
+    const lower = hash.toLowerCase();
+    if (redeemedTxs.has(lower)) {
       setRedeemResult({
         ok: false,
-        reason: "No provider available. Pass a provider prop or set VITE_RPC_URL."
+        reason: "This txHash was already redeemed on this device. If Keys show 0, press Reset Inventory and redeem again."
       });
       return;
     }
 
     setRedeemBusy(true);
     setRedeemResult(null);
-    setChestMsg("");
     setMintMsg("");
     setMintResult(null);
+    setChestMsg("");
 
     try {
       let res;
 
       if (redeemType === "DAILY") {
-        res = await verifyDustClaimTx({
-          provider: activeProvider,
-          txHash: hash,
-          expectedUser: address
-        });
-
+        res = await verifyDustClaimTx({ provider: activeProvider, txHash: hash, expectedUser: address });
         if (!res.ok) {
           setRedeemResult(res);
           return;
         }
 
-        setKeys(k => k + REWARD.daily.keys);
-        setXp(x => x + REWARD.daily.xp);
+        // Grant rewards locally
+        setKeys(k => Number(k) + REWARD.daily.keys);
+        setXp(x => Number(x) + REWARD.daily.xp);
 
         setRedeemedTxs(prev => {
           const n = new Set(prev);
@@ -605,26 +489,19 @@ export default function VaultRunGame({ address, provider }) {
           proofTxHash: hash,
           rarityId,
           rarity: RELIC[rarityId],
-          msg: `Redeemed Daily Claim: +${REWARD.daily.keys} Key, +${REWARD.daily.xp} XP`,
+          msg: `Redeemed: +${REWARD.daily.keys} Key, +${REWARD.daily.xp} XP`,
           details: {
             user: res.user,
-            amount: res.amount.toString(),
-            timestamp: res.timestamp,
-            dust: DUST_ADDRESS,
             proofTxHash: hash,
+            blockNumber: res.blockNumber,
             rarityId,
             rarity: RELIC[rarityId]
           }
         });
 
-        setToast(`Daily claim redeemed. Eligible Relic: ${RELIC[rarityId]} (Linea).`);
+        setToast("Redeem success: Key added. Mint now (mint consumes 1 Key).");
       } else {
-        res = await verifySweepTx({
-          provider: activeProvider,
-          txHash: hash,
-          expectedUser: address
-        });
-
+        res = await verifySweepTx({ provider: activeProvider, txHash: hash, expectedUser: address });
         if (!res.ok) {
           setRedeemResult(res);
           return;
@@ -633,11 +510,10 @@ export default function VaultRunGame({ address, provider }) {
         const ethOutEth = Number(ethers.formatEther(res.ethOut));
         const rawKeys = Math.floor(ethOutEth * 100);
         const keysEarned = clamp(rawKeys, REWARD.sweep.minKeys, REWARD.sweep.maxKeys);
-
         const xpEarned = REWARD.sweep.xpBase + Math.min(750, Math.floor(keysEarned * 75));
 
-        setKeys(k => k + keysEarned);
-        setXp(x => x + xpEarned);
+        setKeys(k => Number(k) + keysEarned);
+        setXp(x => Number(x) + xpEarned);
 
         setRedeemedTxs(prev => {
           const n = new Set(prev);
@@ -653,20 +529,18 @@ export default function VaultRunGame({ address, provider }) {
           proofTxHash: hash,
           rarityId,
           rarity: RELIC[rarityId],
-          msg: `Redeemed Sweep: +${keysEarned} Keys, +${xpEarned} XP`,
+          msg: `Redeemed: +${keysEarned} Keys, +${xpEarned} XP`,
           details: {
             user: res.user,
-            token: res.token,
-            amountIn: res.amountIn.toString(),
-            ethOut: ethOutEth,
-            dustClaimV3: DUSTCLAIMV3_ADDRESS,
             proofTxHash: hash,
+            blockNumber: res.blockNumber,
+            ethOut: ethOutEth,
             rarityId,
             rarity: RELIC[rarityId]
           }
         });
 
-        setToast(`Sweep redeemed. Eligible Relic: ${RELIC[rarityId]} (Linea).`);
+        setToast(`Redeem success: +${keysEarned} Keys added. Mint now (mint consumes 1 Key).`);
       }
     } catch (e) {
       setRedeemResult({ ok: false, reason: e?.message || "Redeem failed." });
@@ -675,12 +549,178 @@ export default function VaultRunGame({ address, provider }) {
     }
   }
 
+  async function mintRelicFromProof() {
+    try {
+      setMintMsg("");
+      setMintResult(null);
+
+      if (!redeemResult?.ok || !redeemResult?.proofTxHash) {
+        setMintMsg("Redeem a txHash first.");
+        return;
+      }
+      if (Number(keys) < 1) {
+        setMintMsg("No Keys available. Redeem txHash to receive Keys.");
+        return;
+      }
+      if (!address || !ethers.isAddress(address)) {
+        setMintMsg("Connect wallet first.");
+        return;
+      }
+      if (!hasInjectedWallet()) {
+        setMintMsg("No injected wallet detected (MetaMask).");
+        return;
+      }
+      if (!RELICS_CONTRACT || !ethers.isAddress(RELICS_CONTRACT)) {
+        setMintMsg("Missing/invalid relic contract address. Set VITE_DUSTRELICS1155_ADDRESS.");
+        return;
+      }
+
+      const proofKey = makeProofKey(redeemResult.proofTxHash, redeemResult.kind);
+      if (mintedProofs.has(proofKey)) {
+        setMintMsg("This proof already minted on this device.");
+        return;
+      }
+
+      setMintBusy(true);
+
+      // deterministic rarity computed client-side
+      const rarityId = rarityFromTxHash(redeemResult.proofTxHash);
+      const amount = 1;
+      const rarityName = RELIC[rarityId] || `Relic #${rarityId}`;
+
+      // get mint signature from Netlify (must sign DustRelics1155 Mint struct with nonce)
+      const resp = await fetch("/.netlify/functions/mintAuth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: redeemResult.proofTxHash,
+          expectedUser: address,
+          nftContract: RELICS_CONTRACT,
+          rarityId,
+          amount
+        })
+      });
+
+      let data = null;
+      try {
+        data = await resp.json();
+      } catch {
+        const reason = "Mint auth failed: invalid server JSON response.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+
+      if (!resp.ok || !data?.ok) {
+        const reason = data?.reason || `Mint auth failed (HTTP ${resp.status}).`;
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+
+      // strict alignment checks
+      if (Number(data.rarityId) !== Number(rarityId)) {
+        const reason = "Server rarity mismatch (mintAuth must derive/accept the same rarityId).";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+      if (Number(data.amount) !== Number(amount)) {
+        const reason = "Server amount mismatch.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+      if (!/^0x[a-fA-F0-9]{64}$/.test(String(data.txHash32 || ""))) {
+        const reason = "Bad txHash32 from server.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+      if (data.nonce === undefined || data.nonce === null) {
+        const reason = "Missing nonce from server (mintAuth must read nonces() and include it in the signature).";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+      if (!data.deadline || Number(data.deadline) <= 0) {
+        const reason = "Missing/invalid deadline from server.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+      if (!data.signature || typeof data.signature !== "string") {
+        const reason = "Missing signature from server.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+
+      // ensure user is on Linea for mint
+      const browserProvider = new ethers.BrowserProvider(window.ethereum);
+      const net = await browserProvider.getNetwork();
+      if (!likelyLineaNetwork(net.chainId)) {
+        const reason = "Wrong network. Switch to Linea Mainnet to mint.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+
+      const signer = await browserProvider.getSigner();
+      const relics = new ethers.Contract(RELICS_CONTRACT, RELICS_ABI, signer);
+
+      setMintMsg(`Minting ${rarityName}… (consumes 1 Key)`);
+
+      const tx = await relics.mintWithSig(
+        data.rarityId,
+        data.amount,
+        data.txHash32,
+        data.deadline,
+        data.signature
+      );
+
+      setMintMsg("Mint submitted…");
+      const receipt = await tx.wait();
+
+      // consume 1 key only after success
+      setKeys(k => Math.max(0, Number(k) - 1));
+
+      // mark proof minted locally
+      setMintedProofs(prev => {
+        const n = new Set(prev);
+        n.add(proofKey);
+        return n;
+      });
+
+      setMintResult({
+        ok: true,
+        msg: `Minted ${rarityName}`,
+        details: {
+          rarityId,
+          rarity: rarityName,
+          mintTxHash: receipt?.hash || tx.hash,
+          proofTxHash: redeemResult.proofTxHash,
+          contract: RELICS_CONTRACT
+        }
+      });
+
+      setMintMsg(`Mint success: ${rarityName} (Key consumed).`);
+    } catch (e) {
+      const reason = e?.shortMessage || e?.message || "Mint failed.";
+      setMintResult({ ok: false, reason });
+      setMintMsg(reason);
+    } finally {
+      setMintBusy(false);
+    }
+  }
+
   const canMint =
     !!redeemResult?.ok &&
     !!redeemResult?.proofTxHash &&
     !!address &&
     !!RELICS_CONTRACT &&
-    ethers.isAddress(RELICS_CONTRACT);
+    ethers.isAddress(RELICS_CONTRACT) &&
+    Number(keys) >= 1;
 
   const mintedThisProof =
     redeemResult?.ok && redeemResult?.proofTxHash
@@ -708,21 +748,22 @@ export default function VaultRunGame({ address, provider }) {
               <span className="vr-mono">
                 {RELICS_CONTRACT && ethers.isAddress(RELICS_CONTRACT)
                   ? RELICS_CONTRACT
-                  : "0x41Dc03adb5E1ee0915BA00617c4516D1293deC6c"}
+                  : "Set VITE_DUSTRELICS1155_ADDRESS"}
               </span>
             </div>
           </div>
 
           <div className="vr-controls">
-            <button className="vr-ghost" onClick={() => resetRun(true)} disabled={isRunning}>
+            <button className="vr-ghost" onClick={() => resetRun(true)} disabled={isRunning} type="button">
               Reroll Vaults
             </button>
+
             {state !== "RUNNING" ? (
-              <button className="vr-primary" onClick={startRun}>
+              <button className="vr-primary" onClick={startRun} type="button">
                 Start Run
               </button>
             ) : (
-              <button className="vr-ghost" onClick={endRun}>
+              <button className="vr-ghost" onClick={endRun} type="button">
                 End Run
               </button>
             )}
@@ -734,10 +775,12 @@ export default function VaultRunGame({ address, provider }) {
             <div className="vr-hud-label">Time</div>
             <div className="vr-hud-value vr-mono">{secondsLeft}s</div>
           </div>
+
           <div className="vr-hud-box">
             <div className="vr-hud-label">Score</div>
             <div className="vr-hud-value vr-mono">{score}</div>
           </div>
+
           <div className="vr-hud-box">
             <div className="vr-hud-label">Energy</div>
             <div className="vr-hearts">
@@ -746,16 +789,19 @@ export default function VaultRunGame({ address, provider }) {
               ))}
             </div>
           </div>
+
           <div className="vr-hud-box">
             <div className="vr-hud-label">Combo</div>
             <div className="vr-hud-value vr-mono">
               {comboCount > 0 ? `x${comboMultiplier(comboCount).toFixed(2)}` : "—"}
             </div>
           </div>
+
           <div className="vr-hud-box">
             <div className="vr-hud-label">Progress</div>
             <div className="vr-hud-value vr-mono">{clearedCount}/{vaults.length}</div>
           </div>
+
           <div className="vr-hud-box">
             <div className="vr-hud-label">Grade</div>
             <div className="vr-hud-value vr-mono">{grade}</div>
@@ -775,8 +821,8 @@ export default function VaultRunGame({ address, provider }) {
                 <ul className="vr-list">
                   <li>Clear vaults quickly to build combo.</li>
                   <li>Failures cost score and energy.</li>
-                  <li>After you claim on-chain, paste the txHash to redeem Keys.</li>
-                  <li>After redeem succeeds, mint your Relic NFT on Linea.</li>
+                  <li>Then redeem a proof txHash to receive Keys.</li>
+                  <li>Mint your Relic on Linea using the Key.</li>
                 </ul>
               </div>
             ) : null}
@@ -811,11 +857,11 @@ export default function VaultRunGame({ address, provider }) {
 
                     <div className="vr-vault-actions">
                       {v.status === "READY" ? (
-                        <button className="vr-primary" onClick={() => clearVaultPractice(v.id)}>
+                        <button className="vr-primary" onClick={() => clearVaultPractice(v.id)} type="button">
                           Clear Vault
                         </button>
                       ) : null}
-                      {v.status === "CLEARING" ? <button className="vr-disabled" disabled>Clearing…</button> : null}
+                      {v.status === "CLEARING" ? <button className="vr-disabled" disabled type="button">Clearing…</button> : null}
                       {v.status === "CLEARED" ? <div className="vr-result ok">Cleared</div> : null}
                       {v.status === "FAILED" ? <div className="vr-result bad">Resisted</div> : null}
                     </div>
@@ -851,8 +897,8 @@ export default function VaultRunGame({ address, provider }) {
                 </div>
 
                 <div className="vr-finish-actions">
-                  <button className="vr-primary" onClick={startRun}>Run Again</button>
-                  <button className="vr-ghost" onClick={() => resetRun(true)}>New Vault Set</button>
+                  <button className="vr-primary" onClick={startRun} type="button">Run Again</button>
+                  <button className="vr-ghost" onClick={() => resetRun(true)} type="button">New Vault Set</button>
                 </div>
               </div>
             ) : null}
@@ -891,13 +937,11 @@ export default function VaultRunGame({ address, provider }) {
               />
 
               <div className="vr-hint">
-                {address
-                  ? <>Verification requires the tx event’s <span className="vr-mono">user</span> to match <span className="vr-mono">{shortAddr(address)}</span>.</>
-                  : <>Tip: pass the connected wallet <span className="vr-mono">address</span> prop to enforce user-matching.</>
-                }
+                Verification requires the tx event’s <span className="vr-mono">user</span> to match{" "}
+                <span className="vr-mono">{shortAddr(address)}</span>.
               </div>
 
-              <button className="vr-primary" onClick={redeem} disabled={redeemBusy}>
+              <button className="vr-primary" onClick={redeem} disabled={redeemBusy} type="button">
                 {redeemBusy ? "Verifying…" : "Verify & Redeem"}
               </button>
 
@@ -909,14 +953,12 @@ export default function VaultRunGame({ address, provider }) {
                   </div>
                   {redeemResult.ok ? (
                     <div className="vr-hint" style={{ marginTop: 8 }}>
-                      Eligible Relic:{" "}
+                      Eligible Relic (deterministic):{" "}
                       <span className="vr-mono">{RELIC[redeemResult.rarityId] || "—"}</span>
                     </div>
                   ) : null}
                   {redeemResult.ok && redeemResult.details ? (
-                    <pre className="vr-pre">
-{JSON.stringify(redeemResult.details, null, 2)}
-                    </pre>
+                    <pre className="vr-pre">{JSON.stringify(redeemResult.details, null, 2)}</pre>
                   ) : null}
                 </div>
               ) : null}
@@ -941,15 +983,13 @@ export default function VaultRunGame({ address, provider }) {
                       <div className="vr-resultbox-top">{mintResult.ok ? "Mint Success" : "Mint Failed"}</div>
                       <div className="vr-resultbox-body">{mintResult.ok ? mintResult.msg : mintResult.reason}</div>
                       {mintResult.ok && mintResult.details ? (
-                        <pre className="vr-pre">
-{JSON.stringify(mintResult.details, null, 2)}
-                        </pre>
+                        <pre className="vr-pre">{JSON.stringify(mintResult.details, null, 2)}</pre>
                       ) : null}
                     </div>
                   ) : null}
 
                   <div className="vr-hint">
-                    Mint requires Linea Mainnet and a valid server signature bound to your txHash + wallet + rarityId.
+                    Mint requires Linea Mainnet and a valid server signature bound to your txHash + wallet + nonce + rarityId.
                   </div>
                 </div>
               ) : null}
@@ -970,18 +1010,26 @@ export default function VaultRunGame({ address, provider }) {
                 <div className="vr-inv-v vr-mono">{keys}</div>
               </div>
               <div className="vr-inv-row">
-                <div className="vr-inv-k">Redeemed tx</div>
+                <div className="vr-inv-k">Redeemed tx (device)</div>
                 <div className="vr-inv-v vr-mono">{redeemedTxs.size}</div>
               </div>
+              <div className="vr-inv-row">
+                <div className="vr-inv-k">Minted proofs (device)</div>
+                <div className="vr-inv-v vr-mono">{mintedProofs.size}</div>
+              </div>
 
-              <button className="vr-primary" onClick={openChest}>
-                Open Chest (1 Key)
+              <button className="vr-primary" onClick={openChest} type="button">
+                Open Chest (1 Key) — cosmetic
+              </button>
+
+              <button className="vr-ghost" onClick={resetInventory} type="button">
+                Reset Inventory (this device)
               </button>
 
               {chestMsg ? <div className="vr-chest">{chestMsg}</div> : null}
 
               <div className="vr-hint">
-                Game loop: play instantly, redeem tx proofs for Keys/XP, mint the Relic NFT on Linea.
+                Keys are granted by redeeming proof txHash. Mint consumes 1 Key only after on-chain success.
               </div>
             </div>
           </div>

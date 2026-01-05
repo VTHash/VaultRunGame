@@ -1,47 +1,39 @@
 import { ethers } from "ethers";
 
-// === Proof contract addresses (Linea versions) ===
-// Keep these aligned with your frontend txReedem.js
+// === Proof contract addresses (Linea) ===
 const DUST_ADDRESS = "0xF312Ec9f8087C87fbF3439B0369eA233a1EE4A7D";
 const DUSTCLAIMV3_ADDRESS = "0xBB45cc85B5e6505Ad1C8403227Da68ba0F13357B";
 
-// Events must match your txReedem.js
+// Events (must match txReedem.js)
 const DUST_ABI_EVENTS = [
-  "event Claimed(address indexed user, uint256 amount, uint256 timestamp)"
+  "event Claimed(address indexed user, uint256 amount, uint256 timestamp)",
 ];
 
 const DUSTCLAIM_ABI_EVENTS = [
-  "event DustClaimed(address indexed user, address indexed token, uint256 amountIn, uint256 ethOut)"
+  "event DustClaimed(address indexed user, address indexed token, uint256 amountIn, uint256 ethOut)",
 ];
 
 const dustIface = new ethers.Interface(DUST_ABI_EVENTS);
 const claimIface = new ethers.Interface(DUSTCLAIM_ABI_EVENTS);
 
-// ERC1155 relics contract: only need nonces(to)
+// ERC1155 relics: read nonce
 const RELICS_READ_ABI = [
-  "function nonces(address) view returns (uint256)"
+  "function nonces(address) view returns (uint256)",
 ];
 
-// Rarity IDs (must match DustRelics1155.sol)
-const RELIC = {
-  SILVER: 1,
-  GOLD: 2,
-  DIAMOND: 3,
-  EMERALD: 4
-};
+// ---------------------------------------
+// IMPORTANT: deterministic rarity by txHash
+// MUST match frontend thresholds exactly.
+// ---------------------------------------
+function rarityFromTxHash(txHash) {
+  const h = ethers.keccak256(ethers.getBytes(txHash));
+  const n = Number(BigInt(h.slice(0, 10))); // first 4 bytes
+  const pct = n / 0xffffffff;
 
-// Tune rarity logic here
-function computeRarityFromProof({ kind, ethOut }) {
-  if (kind === "DUST_DAILY") return RELIC.SILVER;
-
-  // Sweep: rarity based on ETH out (wei)
-  const eth = Number(ethers.formatEther(ethOut || 0n));
-
-  // Example thresholds (adjust to taste)
-  if (eth >= 0.02) return RELIC.EMERALD;
-  if (eth >= 0.01) return RELIC.DIAMOND;
-  if (eth >= 0.004) return RELIC.GOLD;
-  return RELIC.SILVER;
+  if (pct > 0.92) return 4; // EMERALD
+  if (pct > 0.75) return 3; // DIAMOND
+  if (pct > 0.45) return 2; // GOLD
+  return 1; // SILVER
 }
 
 function json(statusCode, body) {
@@ -50,6 +42,8 @@ function json(statusCode, body) {
     headers: {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "POST,OPTIONS",
     },
     body: JSON.stringify(body),
   };
@@ -57,17 +51,7 @@ function json(statusCode, body) {
 
 export async function handler(event) {
   try {
-    if (event.httpMethod === "OPTIONS") {
-      return {
-        statusCode: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type",
-          "Access-Control-Allow-Methods": "POST,OPTIONS",
-        },
-        body: "",
-      };
-    }
+    if (event.httpMethod === "OPTIONS") return json(204, { ok: true });
 
     if (event.httpMethod !== "POST") {
       return json(405, { ok: false, reason: "Method not allowed" });
@@ -86,9 +70,19 @@ export async function handler(event) {
       return json(400, { ok: false, reason: "Invalid nftContract" });
     }
 
-    // Linea RPC (mint chain + proof chain if you are enforcing Linea-only proofs)
+    // ENV must be present in Netlify site settings
     const rpcUrl = process.env.LINEA_RPC_URL;
+    const signerPk = process.env.MINT_SIGNER_PRIVATE_KEY;
+
     if (!rpcUrl) return json(500, { ok: false, reason: "Missing LINEA_RPC_URL" });
+    if (!signerPk) return json(500, { ok: false, reason: "Missing MINT_SIGNER_PRIVATE_KEY" });
+
+    // Logging (safe)
+    console.log("[mintAuth] request", {
+      txHash: tx.slice(0, 10) + "...",
+      expectedUser,
+      nftContract,
+    });
 
     const provider = new ethers.JsonRpcProvider(rpcUrl);
 
@@ -103,7 +97,7 @@ export async function handler(event) {
 
     const expected = expectedUser.toLowerCase();
 
-    // Parse proof events exactly like frontend
+    // Parse proof events
     let proof = null;
 
     for (const log of receipt.logs) {
@@ -120,15 +114,7 @@ export async function handler(event) {
             return json(400, { ok: false, reason: "This tx was not made by the connected wallet." });
           }
 
-          proof = {
-            ok: true,
-            kind: "DUST_DAILY",
-            user,
-            amount: parsed.args.amount,
-            timestamp: Number(parsed.args.timestamp),
-            txHash: receipt.hash,
-            blockNumber: receipt.blockNumber,
-          };
+          proof = { kind: "DUST_DAILY", user };
           break;
         } catch {}
       }
@@ -144,50 +130,30 @@ export async function handler(event) {
             return json(400, { ok: false, reason: "This tx was not made by the connected wallet." });
           }
 
-          proof = {
-            ok: true,
-            kind: "SWEEP",
-            user,
-            token: parsed.args.token,
-            amountIn: parsed.args.amountIn,
-            ethOut: parsed.args.ethOut,
-            txHash: receipt.hash,
-            blockNumber: receipt.blockNumber,
-          };
+          proof = { kind: "SWEEP", user };
           break;
         } catch {}
       }
     }
 
-    if (!proof?.ok) {
+    if (!proof) {
       return json(400, { ok: false, reason: "No valid proof event found in this transaction." });
     }
 
-    // Rarity
-    const rarityId = computeRarityFromProof({
-      kind: proof.kind,
-      ethOut: proof.ethOut,
-    });
-
-    // One mint per proof
+    // Deterministic rarity (same as frontend)
+    const rarityId = rarityFromTxHash(tx);
     const amount = 1;
-
-    // txHash is already bytes32 formatted
     const txHash32 = tx.toLowerCase();
 
-    // Read nonce from the ERC1155 contract on Linea
+    // Read nonce from ERC1155 contract
     const relicsRead = new ethers.Contract(nftContract, RELICS_READ_ABI, provider);
     const nonce = await relicsRead.nonces(expectedUser);
 
-    // Signer key
-    const signerPk = process.env.MINT_SIGNER_PRIVATE_KEY;
-    if (!signerPk) return json(500, { ok: false, reason: "Missing MINT_SIGNER_PRIVATE_KEY" });
-
     const signer = new ethers.Wallet(signerPk);
 
-    const deadline = Math.floor(Date.now() / 1000) + 15 * 60; // 15 minutes
+    const deadline = Math.floor(Date.now() / 1000) + 15 * 60;
 
-    // Must match: EIP712("DustRelics1155","1")
+    // Must match contract domain exactly
     const domain = {
       name: "DustRelics1155",
       version: "1",
@@ -195,8 +161,7 @@ export async function handler(event) {
       verifyingContract: nftContract,
     };
 
-    // Must match Solidity typehash string exactly:
-    // "Mint(address to,uint256 id,uint256 amount,bytes32 txHash,uint256 nonce,uint256 deadline)"
+    // Must match Solidity typehash exactly
     const types = {
       Mint: [
         { name: "to", type: "address" },
@@ -219,6 +184,13 @@ export async function handler(event) {
 
     const signature = await signer.signTypedData(domain, types, value);
 
+    console.log("[mintAuth] signed", {
+      kind: proof.kind,
+      rarityId,
+      nonce: nonce.toString(),
+      deadline,
+    });
+
     return json(200, {
       ok: true,
       kind: proof.kind,
@@ -228,17 +200,9 @@ export async function handler(event) {
       nonce: nonce.toString(),
       deadline,
       signature,
-      proof: {
-        kind: proof.kind,
-        txHash: proof.txHash,
-        blockNumber: proof.blockNumber,
-        user: proof.user,
-        ...(proof.kind === "DUST_DAILY"
-          ? { amount: proof.amount.toString(), timestamp: proof.timestamp }
-          : { token: proof.token, amountIn: proof.amountIn.toString(), ethOut: proof.ethOut.toString() }),
-      },
     });
   } catch (e) {
+    console.log("[mintAuth] error", e?.message || e);
     return json(500, { ok: false, reason: e?.message || "Server error" });
   }
 }
