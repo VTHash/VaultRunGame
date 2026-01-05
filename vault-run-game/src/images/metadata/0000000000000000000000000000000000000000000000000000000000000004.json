@@ -1,7 +1,8 @@
+
 {
   "name": "EmeraldDust Relic",
   "description": "Vault Run Relic (Legendary). Minted after verified txHash proof.",
-  "image": "ipfs://<IMAGES_CID>/emerald.png",
+  "image": "ipfs://Qmcp5xerqxd85BGckyXqcvpmZo2TX3PQFFj8StfBtfiAdi",
   "attributes": [
     { "trait_type": "Rarity", "value": "Legendary" }
   ]
