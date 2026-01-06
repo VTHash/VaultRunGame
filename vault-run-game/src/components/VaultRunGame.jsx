@@ -10,6 +10,12 @@
 // 3) Rarity is deterministic from proof txHash (prevents reroll abuse).
 // 4) Frontend sends rarityId + amount to mintAuth, and enforces server matches them.
 // 5) Every button uses type="button" to prevent form-submit issues.
+//
+// Wallet behavior (IMPORTANT):
+// - Connect Wallet button opens Reown AppKit modal (works on mobile + desktop).
+// - We do NOT rely on window.ethereum for connecting.
+// - For minting, we use the wallet provider from AppKit if available,
+// otherwise fallback to injected provider if present.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ethers } from "ethers";
@@ -20,6 +26,9 @@ import {
   verifyDustClaimTx,
   verifySweepTx
 } from "../utils/txReedem";
+
+// Reown AppKit (modal + provider)
+import { useAppKit, useAppKitProvider } from "@reown/appkit/react";
 
 const RUN_SECONDS = 90;
 const START_ENERGY = 5;
@@ -190,10 +199,6 @@ function pickReadProvider(passedProvider) {
   return new ethers.JsonRpcProvider(rpc);
 }
 
-function hasInjectedWallet() {
-  return typeof window !== "undefined" && typeof window.ethereum !== "undefined";
-}
-
 function isLikelyTxHash(s) {
   return /^0x([A-Fa-f0-9]{64})$/.test((s || "").trim());
 }
@@ -248,10 +253,6 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
   const [mintMsg, setMintMsg] = useState("");
   const [mintResult, setMintResult] = useState(null);
 
-  // Wallet connect state (MetaMask)
-  const [walletAddress, setWalletAddress] = useState("");
-  const [walletReady, setWalletReady] = useState(false);
-
   const timerRef = useRef(null);
   const isRunning = state === "RUNNING";
 
@@ -261,18 +262,22 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
   // Read provider for verifying tx receipts (RPC)
   const readProvider = useMemo(() => pickReadProvider(providerProp), [providerProp]);
 
-  // effective address: use prop if passed, otherwise connected wallet
-  const effectiveAddress = useMemo(() => {
-    if (addressProp && ethers.isAddress(addressProp)) return addressProp;
-    if (walletAddress && ethers.isAddress(walletAddress)) return walletAddress;
-    return "";
-  }, [addressProp, walletAddress]);
-
   // env: accept both names, prefer VITE_DUSTRELICS1155_ADDRESS
   const RELICS_CONTRACT =
     import.meta.env.VITE_DUSTRELICS1155_ADDRESS ||
     import.meta.env.VITE_DUST_RELICS_ADDRESS ||
     "";
+
+  // Reown AppKit modal + provider
+  const { open } = useAppKit();
+  // NOTE: most setups use "eip155" here; if your package expects a different key, keep "eip155".
+  const { walletProvider } = useAppKitProvider("eip155");
+
+  // effective address comes from App prop (App.jsx uses useAppKitAccount) OR stays empty
+  const effectiveAddress = useMemo(() => {
+    if (addressProp && ethers.isAddress(addressProp)) return addressProp;
+    return "";
+  }, [addressProp]);
 
   // Load persisted
   useEffect(() => {
@@ -289,73 +294,13 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
     saveState({ xp, keys, redeemedTxs, mintedProofs });
   }, [xp, keys, redeemedTxs, mintedProofs]);
 
-  // Attempt eager wallet detection
-  useEffect(() => {
-    let cancelled = false;
-
-    async function initWallet() {
-      try {
-        if (!hasInjectedWallet()) return;
-        const bp = new ethers.BrowserProvider(window.ethereum);
-        const accounts = await bp.send("eth_accounts", []);
-        if (cancelled) return;
-
-        if (accounts?.[0] && ethers.isAddress(accounts[0])) {
-          setWalletAddress(accounts[0]);
-          setWalletReady(true);
-        }
-
-        // Listen for account / chain changes
-        window.ethereum?.on?.("accountsChanged", (accs) => {
-          const a = accs?.[0] || "";
-          setWalletAddress(a);
-          setWalletReady(!!a);
-        });
-
-        window.ethereum?.on?.("chainChanged", () => {
-          // force refresh state next action
-          setWalletReady(true);
-        });
-      } catch {
-        // ignore
-      }
-    }
-
-    initWallet();
-    return () => {
-      cancelled = true;
-      try {
-        window.ethereum?.removeAllListeners?.("accountsChanged");
-        window.ethereum?.removeAllListeners?.("chainChanged");
-      } catch {}
-    };
-  }, []);
-
-  async function connectWallet() {
-    if (!hasInjectedWallet()) {
-      setToast("No wallet detected. Install MetaMask.");
-      return;
-    }
+  // Open AppKit modal (mobile + desktop)
+  function connectWallet() {
     try {
-      const bp = new ethers.BrowserProvider(window.ethereum);
-      const accounts = await bp.send("eth_requestAccounts", []);
-      const a = accounts?.[0] || "";
-      if (!a || !ethers.isAddress(a)) {
-        setToast("Wallet connect failed.");
-        return;
-      }
-      setWalletAddress(a);
-      setWalletReady(true);
-
-      // Encourage Linea
-      const net = await bp.getNetwork();
-      if (!likelyLineaNetwork(net.chainId)) {
-        setToast("Connected. Now switch MetaMask network to Linea Mainnet to mint.");
-      } else {
-        setToast("Wallet connected on Linea. You can redeem and mint.");
-      }
-    } catch (e) {
-      setToast(e?.message || "Wallet connect cancelled.");
+      open();
+    } catch {
+      // keep behavior silent; toast helps user
+      setToast("Unable to open wallet modal.");
     }
   }
 
@@ -646,10 +591,6 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
         setMintMsg("Connect wallet first.");
         return;
       }
-      if (!hasInjectedWallet()) {
-        setMintMsg("No injected wallet detected (MetaMask).");
-        return;
-      }
       if (!RELICS_CONTRACT || !ethers.isAddress(RELICS_CONTRACT)) {
         setMintMsg("Missing/invalid relic contract address. Set VITE_DUSTRELICS1155_ADDRESS.");
         return;
@@ -735,9 +676,19 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
         return;
       }
 
-      // ensure user is on Linea for mint
-      const bp = new ethers.BrowserProvider(window.ethereum);
+      // Build a BrowserProvider from AppKit provider (WalletConnect / mobile) if present.
+      // Fallback to injected provider (desktop MetaMask) if present.
+      const providerToUse = walletProvider || (typeof window !== "undefined" ? window.ethereum : null);
+      if (!providerToUse) {
+        const reason = "No wallet provider available. Press Connect Wallet.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+
+      const bp = new ethers.BrowserProvider(providerToUse);
       const net = await bp.getNetwork();
+
       if (!likelyLineaNetwork(net.chainId)) {
         const reason = "Wrong network. Switch to Linea Mainnet to mint.";
         setMintMsg(reason);
@@ -1113,7 +1064,6 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
               <button className="vr-primary" onClick={openChest} type="button">
                 Open Chest (1 Key) — cosmetic
               </button>
-
 
               <button className="vr-ghost" onClick={resetInventory} type="button">
                 Reset Inventory (this device)
