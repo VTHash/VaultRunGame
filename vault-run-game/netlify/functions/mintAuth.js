@@ -149,7 +149,7 @@ export async function handler(event) {
     const relicsRead = new ethers.Contract(nftContract, RELICS_READ_ABI, provider);
     const nonce = await relicsRead.nonces(expectedUser);
 
-    const signer = new ethers.Wallet(signerPk);
+    const signer = new ethers.Wallet(signerPk,provider);
 
     const deadline = Math.floor(Date.now() / 1000) + 15 * 60;
 
