@@ -13,9 +13,9 @@
 //
 // Wallet behavior (IMPORTANT):
 // - Connect Wallet button opens Reown AppKit modal (works on mobile + desktop).
-// - We do NOT rely on window.ethereum for connecting.
 // - For minting, we use the wallet provider from AppKit if available,
 // otherwise fallback to injected provider if present.
+// - We auto-switch to Linea Mainnet before minting.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ethers } from "ethers";
@@ -56,6 +56,15 @@ const TIERS = {
 };
 
 const LINEA_CHAIN_ID = 59144;
+
+// For wallet_switchEthereumChain / add chain
+const LINEA_PARAMS = {
+  chainId: "0xE708", // 59144
+  chainName: "Linea Mainnet",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://rpc.linea.build"],
+  blockExplorerUrls: ["https://lineascan.build"]
+};
 
 // Solidity IDs (DustRelics1155)
 const RELIC = {
@@ -222,6 +231,32 @@ function rarityFromTxHash(txHash) {
   return 1;
 }
 
+// Ensure Linea on the current wallet provider session
+async function ensureLinea(bp) {
+  const net = await bp.getNetwork();
+  if (likelyLineaNetwork(net.chainId)) return true;
+
+  try {
+    await bp.send("wallet_switchEthereumChain", [{ chainId: LINEA_PARAMS.chainId }]);
+    return true;
+  } catch (e) {
+    const code = e?.code;
+    const msg = String(e?.message || "").toLowerCase();
+
+    // chain not added
+    if (code === 4902 || msg.includes("unrecognized chain") || msg.includes("unknown chain")) {
+      try {
+        await bp.send("wallet_addEthereumChain", [LINEA_PARAMS]);
+        await bp.send("wallet_switchEthereumChain", [{ chainId: LINEA_PARAMS.chainId }]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
 export default function VaultRunGame({ address: addressProp, provider: providerProp }) {
   const [mode] = useState("PRACTICE");
   const [state, setState] = useState("IDLE");
@@ -270,10 +305,9 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
 
   // Reown AppKit modal + provider
   const { open } = useAppKit();
-  // NOTE: most setups use "eip155" here; if your package expects a different key, keep "eip155".
   const { walletProvider } = useAppKitProvider("eip155");
 
-  // effective address comes from App prop (App.jsx uses useAppKitAccount) OR stays empty
+  // effective address comes from App prop (App.jsx uses useAppKitAccount)
   const effectiveAddress = useMemo(() => {
     if (addressProp && ethers.isAddress(addressProp)) return addressProp;
     return "";
@@ -299,7 +333,6 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
     try {
       open();
     } catch {
-      // keep behavior silent; toast helps user
       setToast("Unable to open wallet modal.");
     }
   }
@@ -676,9 +709,10 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
         return;
       }
 
-      // Build a BrowserProvider from AppKit provider (WalletConnect / mobile) if present.
-      // Fallback to injected provider (desktop MetaMask) if present.
-      const providerToUse = walletProvider || (typeof window !== "undefined" ? window.ethereum : null);
+      // Prefer AppKit provider (WalletConnect, mobile). Fallback to injected.
+      const injected = typeof window !== "undefined" ? window.ethereum : null;
+      const providerToUse = walletProvider || injected;
+
       if (!providerToUse) {
         const reason = "No wallet provider available. Press Connect Wallet.";
         setMintMsg(reason);
@@ -687,10 +721,20 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
       }
 
       const bp = new ethers.BrowserProvider(providerToUse);
-      const net = await bp.getNetwork();
 
+      // Auto-switch to Linea (this is the missing piece that fixes mobile chain mismatch)
+      const switched = await ensureLinea(bp);
+      if (!switched) {
+        const reason = "Please switch to Linea Mainnet in your wallet to mint.";
+        setMintMsg(reason);
+        setMintResult({ ok: false, reason });
+        return;
+      }
+
+      // Re-check after switch
+      const net = await bp.getNetwork();
       if (!likelyLineaNetwork(net.chainId)) {
-        const reason = "Wrong network. Switch to Linea Mainnet to mint.";
+        const reason = "Still not on Linea. Close wallet, reopen, and try again.";
         setMintMsg(reason);
         setMintResult({ ok: false, reason });
         return;
