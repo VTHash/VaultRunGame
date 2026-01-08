@@ -1,3 +1,4 @@
+// src/App.jsx
 import React from "react";
 import VaultRunGame from "./components/VaultRunGame";
 import { useLineaReadProvider } from "./hooks/useLineaReadProvider";
@@ -13,11 +14,14 @@ export default function App() {
 
   return (
     <VaultRunGame
-      address={isConnected ? address : undefined}
+      // wallet identity
+      address={isConnected && address ? address : undefined}
+      // read-only RPC (Linea) for verifying receipts
       provider={lineaProvider}
-      // NEW: used by the game "Connect Wallet" button
-      onConnectWallet={() => open()}
+      // write provider (walletconnect/metamask via AppKit)
       walletProvider={walletProvider}
+      // Connect button handler
+      onConnectWallet={() => open()}
     />
   );
 }

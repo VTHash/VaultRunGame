@@ -11,9 +11,9 @@
 // 4) Frontend sends rarityId + amount to mintAuth, and enforces server matches them.
 // 5) Every button uses type="button" to prevent form-submit issues.
 //
-// Wallet behavior (IMPORTANT):
-// - Connect Wallet button opens Reown AppKit modal (works on mobile + desktop).
-// - For minting, we use the wallet provider from AppKit if available,
+// Wallet behavior (APP-OWNED):
+// - Connect Wallet button calls onConnectWallet() (Reown AppKit modal) (works on mobile + desktop).
+// - For minting, we use walletProvider (EIP-1193) passed from App if available,
 // otherwise fallback to injected provider if present.
 // - We auto-switch to Linea Mainnet before minting.
 
@@ -26,9 +26,6 @@ import {
   verifyDustClaimTx,
   verifySweepTx
 } from "../utils/txReedem";
-
-// Reown AppKit (modal + provider)
-import { useAppKit, useAppKitProvider } from "@reown/appkit/react";
 
 const RUN_SECONDS = 90;
 const START_ENERGY = 5;
@@ -257,7 +254,12 @@ async function ensureLinea(bp) {
   }
 }
 
-export default function VaultRunGame({ address: addressProp, provider: providerProp }) {
+export default function VaultRunGame({
+  address: addressProp,
+  provider: providerProp,
+  walletProvider,
+  onConnectWallet
+}) {
   const [mode] = useState("PRACTICE");
   const [state, setState] = useState("IDLE");
   const [secondsLeft, setSecondsLeft] = useState(RUN_SECONDS);
@@ -303,10 +305,6 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
     import.meta.env.VITE_DUST_RELICS_ADDRESS ||
     "";
 
-  // Reown AppKit modal + provider
-  const { open } = useAppKit();
-  const { walletProvider } = useAppKitProvider("eip155");
-
   // effective address comes from App prop (App.jsx uses useAppKitAccount)
   const effectiveAddress = useMemo(() => {
     if (addressProp && ethers.isAddress(addressProp)) return addressProp;
@@ -328,13 +326,13 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
     saveState({ xp, keys, redeemedTxs, mintedProofs });
   }, [xp, keys, redeemedTxs, mintedProofs]);
 
-  // Open AppKit modal (mobile + desktop)
+  // Connect Wallet button (App-owned)
   function connectWallet() {
-    try {
-      open();
-    } catch {
-      setToast("Unable to open wallet modal.");
+    if (typeof onConnectWallet === "function") {
+      onConnectWallet();
+      return;
     }
+    setToast("Wallet connect is not configured.");
   }
 
   // Combo expiry
@@ -722,7 +720,7 @@ export default function VaultRunGame({ address: addressProp, provider: providerP
 
       const bp = new ethers.BrowserProvider(providerToUse);
 
-      // Auto-switch to Linea (this is the missing piece that fixes mobile chain mismatch)
+      // Auto-switch to Linea
       const switched = await ensureLinea(bp);
       if (!switched) {
         const reason = "Please switch to Linea Mainnet in your wallet to mint.";
