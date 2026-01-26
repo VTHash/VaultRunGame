@@ -2,7 +2,7 @@
 {
   "name": "SilverDust Relic",
   "description": "Vault Run Relic (Common). Minted after verified txHash proof.",
-  "image": "ipfs://QmPMKixHqpoj4BNW98Ccs1EZmmrt17228yMa3XwPVwX5fY/silver.png",
+  "image": "https://lavender-calm-emu-846.mypinata.cloud/ipfs/bafybeib23vpuwgfgoc5or37rykhx3vguol4eykjexpv6cvmkwjrzjy6r3m",
   "attributes": [
     { "trait_type": "Rarity", "value": "Common" }
   ]

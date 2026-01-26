@@ -2,7 +2,7 @@
 {
   "name": "EmeraldDust Relic",
   "description": "Vault Run Relic (Legendary). Minted after verified txHash proof.",
-  "image": "ipfs://Qmcp5xerqxd85BGckyXqcvpmZo2TX3PQFFj8StfBtfiAdi/emerald.png",
+  "image": "https://lavender-calm-emu-846.mypinata.cloud/ipfs/bafybeigcfwwmjbaimtulzjtynzey7i47frz7bkifcucsj652gnsd7m7nim",
   "attributes": [
     { "trait_type": "Rarity", "value": "Legendary" }
   ]

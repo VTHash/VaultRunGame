@@ -2,7 +2,7 @@
 {
   "name": "DiamondDust Relic",
   "description": "Vault Run Relic (Epic). Minted after verified txHash proof.",
-  "image": "ipfs://QmRyvZwGuCtzLc6eh3YnX3EoVzdTx5w6kCFMLWTqu1D447/diamond.png",
+  "image": "https://lavender-calm-emu-846.mypinata.cloud/ipfs/bafybeidlmkn34xbm273l2xxgn4siyc3o5clluaikqp3kbsydz3t6zvwuja",
   "attributes": [
     { "trait_type": "Rarity", "value": "Epic" }
   ]

@@ -1,7 +1,7 @@
 {
   "name": "GoldenDust Relic",
   "description": "Vault Run Relic (Rare). Minted after verified txHash proof.",
-  "image": "ipfs://QmUozatLjB5pLqjyj5pj26CU9bsL6KhfmFoXxydKTEx7oH/gold.png",
+  "image": "https://lavender-calm-emu-846.mypinata.cloud/ipfs/bafybeigu4gtgiotowd3r5krjv4yjw3ceyyoeet3kksf3bl7lzsuzdq6ydu",
   "attributes": [
     { "trait_type": "Rarity", "value": "Rare" }
   ]
