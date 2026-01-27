@@ -5,7 +5,7 @@ import { ethers } from "ethers";
 // Linea Mainnet Addresses
 // -----------------------------
 export const DUST_ADDRESS = "0xF312Ec9f8087C87fbF3439B0369eA233a1EE4A7D";
-export const DUSTCLAIMV3_ADDRESS = "0xBB45cc85B5e6505Ad1C8403227Da68ba0F13357B";
+export const DUSTCLAIMV3_ADDRESS = "0x3Cef985383FE054Bb43152480484fA28fC942A06";
 
 // -----------------------------
 // DustRelics1155 (ERC1155) config
